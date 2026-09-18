@@ -53,6 +53,37 @@ func TestHandleMessage_RejectedUnsubscribeIsWarned(t *testing.T) {
 	require.Len(t, logs.FilterLevelExact(zapcore.WarnLevel).All(), 1)
 }
 
+// A non-numeric result for a request that IS a pending subscribe is a
+// malformed reply, not an unsubscribe acknowledgement: the subscription must
+// be failed so a caller blocked in Recv is released.
+func TestHandleMessage_NonNumericResultForPendingSubscribeFailsIt(t *testing.T) {
+	logs := captureLogs(t)
+	c := &Client{
+		subscriptionByRequestID: map[uint64]*Subscription{},
+		subscriptionByWSSubID:   map[uint64]*Subscription{},
+	}
+	req := &request{ID: 42}
+	sub := newSubscription(
+		req,
+		func(err error) { c.closeSubscription(req.ID, err) },
+		"testUnsubscribe",
+		func([]byte) (any, error) { return nil, nil },
+	)
+	c.subscriptionByRequestID[req.ID] = sub
+
+	c.handleMessage([]byte(`{"jsonrpc":"2.0","result":true,"id":42}`))
+
+	select {
+	case err := <-sub.err:
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "not a subscription id")
+	default:
+		t.Fatal("malformed subscribe reply was not surfaced to the subscription")
+	}
+	require.Empty(t, c.subscriptionByRequestID)
+	require.Empty(t, logs.FilterLevelExact(zapcore.ErrorLevel).All())
+}
+
 // End to end against the mock server: subscribe, unsubscribe, and have the
 // server acknowledge the unsubscribe the way an RPC node does.
 func TestUnsubscribe_ServerAckDoesNotLogError(t *testing.T) {
