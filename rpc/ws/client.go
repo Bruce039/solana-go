@@ -217,13 +217,36 @@ func (c *Client) handleMessage(message []byte) {
 			c.closeSubscription(requestID, rpcErr)
 			return
 		}
-		subID, _ := getUint64WithOk(message, "result")
+		subID, isSubID := getUint64WithOk(message, "result")
+		if !isSubID {
+			// A reply whose result is not a subscription number is the
+			// acknowledgement of a request that opens no stream, i.e. the
+			// {"result":true,"id":N} answer to an unsubscribe. No handler is
+			// registered under those request IDs, so it must not be routed as
+			// a new subscription.
+			c.handleUnsubscribeAck(requestID, message)
+			return
+		}
 		c.handleNewSubscriptionMessage(requestID, subID)
 		return
 	}
 
 	subID, _ := getUint64WithOk(message, "params", "subscription")
 	c.handleSubscriptionMessage(subID, message)
+}
+
+func (c *Client) handleUnsubscribeAck(requestID uint64, message []byte) {
+	if acked, err := jsonparser.GetBoolean(message, "result"); err == nil && !acked {
+		zlog.Warn("rpc unsubscribe was rejected by the server",
+			zap.Uint64("request_id", requestID),
+		)
+		return
+	}
+	if traceEnabled {
+		zlog.Debug("received unsubscribe acknowledgement",
+			zap.Uint64("request_id", requestID),
+		)
+	}
 }
 
 func (c *Client) handleNewSubscriptionMessage(requestID, subID uint64) {
